@@ -209,6 +209,21 @@ void MP1Node::checkMessages() {
     return;
 }
 
+
+MessageHdr* newMessage(MsgTypes type, Address addr, vector<MemberListEntry> memberList) {
+  MessageHdr* msg;
+  
+  size_t msgsize = sizeof(MessageHdr) + sizeof(addr.addr) + memberList.size()*sizeof(MemberListEntry) + 1;
+  msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+
+  // create JOINREQ message: format of data is {struct Address myaddr}
+  msg->msgType = type;
+  memcpy((char *)(msg+1), &(addr.addr), sizeof(addr.addr));
+  memcpy((char *)(msg+1+sizeof(addr.addr)), &(*memberList.begin()), memberList.size()*sizeof(MemberListEntry)); 
+
+  return msg;
+}
+
 /**
  * FUNCTION NAME: recvCallBack
  *
@@ -218,6 +233,44 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 	/*
 	 * Your code goes here
 	 */
+  
+	Member* self = (Member*)env;
+  MessageHdr* msg = (MessageHdr*)data;
+	Address* addr = (Address*)malloc(sizeof(Address));
+	memcpy((char *)(addr->addr), (char*)(msg+1), sizeof(addr->addr)); 
+ 
+	switch(msg->msgType) {
+	    case JOINREQ:
+	       {
+ #ifdef DEBUGLOG
+	        log->LOG(&self->addr, "Received JOINREQ..."); 
+		      log->LOG(addr, "Sent Join request..");
+ #endif
+	         
+	        long* heartbeat = (long*)(msg + 1 + sizeof(addr->addr));
+
+      		int id = *(int*)(&addr->addr);
+      		int port = *(short*)(&addr->addr[4]);
+      		//MemberListEntry mle(id, port, *heartbeat, this->par->getcurrtime());	         
+      		//self->memberList.push_back(mle);
+          MessageHdr* sendMsg = newMessage(JOINREP, self->addr, self->memberList);
+      	  emulNet->ENsend(&self->addr, addr, (char*)(sendMsg), sizeof(MessageHdr) + sizeof(Address) + self->memberList.size()*sizeof(MemberListEntry)+1);
+          free(sendMsg);
+         }
+	       break;
+
+	    case JOINREP:
+	    	{
+			    self->inGroup = true;
+         		#ifdef DEBUGLOG
+          			log->LOG(&self->addr, "Received JOINREP..");
+         		#endif
+         	}
+	       break;
+	}
+	
+	free(msg);
+	free(addr);
 }
 
 /**
@@ -279,3 +332,4 @@ void MP1Node::printAddress(Address *addr)
     printf("%d.%d.%d.%d:%d \n",  addr->addr[0],addr->addr[1],addr->addr[2],
                                                        addr->addr[3], *(short*)&addr->addr[4]) ;    
 }
+
