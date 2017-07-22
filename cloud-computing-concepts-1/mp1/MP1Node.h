@@ -19,7 +19,7 @@
  * Macros
  */
 #define TREMOVE 20
-#define TFAIL 5
+#define TFAIL 10
 
 /*
  * Note: You can change/add any functions in MP1Node.{h,cpp}
@@ -31,6 +31,7 @@
 enum MsgTypes{
     JOINREQ,
     JOINREP,
+    HEARTBEAT,
     DUMMYLASTMSGTYPE
 };
 
@@ -75,6 +76,14 @@ public:
 	Address getJoinAddress();
 	void initMemberListTable(Member *memberNode);
 	void printAddress(Address *addr);
+	MessageHdr* newMessage(MsgTypes type, Address addr, vector<MemberListEntry> memberList);
+	void updateMembershipList(std::vector<MemberListEntry>);
+	void removeMembersIfFailed();
+	void sendHeartbeat();
+	void printMembership(std::vector<MemberListEntry>);
+	Address getAddress(int id, short port);
+	int getId(Address addr);
+	short getPort(Address addr);
 	virtual ~MP1Node();
 };
 

@@ -16,6 +16,9 @@
  * You can add new members to the class if you think it
  * is necessary for your logic to work
  */
+
+//#define DEBUGLOG_1
+//#define DEBUGLOG_2
 MP1Node::MP1Node(Member *member, Params *params, EmulNet *emul, Log *log, Address *address) {
 	for( int i = 0; i < 6; i++ ) {
 		NULLADDR[i] = 0;
@@ -70,7 +73,7 @@ void MP1Node::nodeStart(char *servaddrstr, short servport) {
 
     // Self booting routines
     if( initThisNode(&joinaddr) == -1 ) {
-#ifdef DEBUGLOG
+#ifdef DEBUGLOG_1
         log->LOG(&memberNode->addr, "init_thisnode failed. Exit.");
 #endif
         exit(1);
@@ -78,7 +81,7 @@ void MP1Node::nodeStart(char *servaddrstr, short servport) {
 
     if( !introduceSelfToGroup(&joinaddr) ) {
         finishUpThisNode();
-#ifdef DEBUGLOG
+#ifdef DEBUGLOG_1
         log->LOG(&memberNode->addr, "Unable to join self to group. Exiting.");
 #endif
         exit(1);
@@ -119,13 +122,13 @@ int MP1Node::initThisNode(Address *joinaddr) {
  */
 int MP1Node::introduceSelfToGroup(Address *joinaddr) {
 	MessageHdr *msg;
-#ifdef DEBUGLOG
+#ifdef DEBUGLOG_1
     static char s[1024];
 #endif
 
     if ( 0 == memcmp((char *)&(memberNode->addr.addr), (char *)&(joinaddr->addr), sizeof(memberNode->addr.addr))) {
         // I am the group booter (first process to join the group). Boot up the group
-#ifdef DEBUGLOG
+#ifdef DEBUGLOG_1
         log->LOG(&memberNode->addr, "Starting up group...");
 #endif
         memberNode->inGroup = true;
@@ -139,7 +142,7 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
         memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
         memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
 
-#ifdef DEBUGLOG
+#ifdef DEBUGLOG_1
         sprintf(s, "Trying to join...");
         log->LOG(&memberNode->addr, s);
 #endif
@@ -210,16 +213,18 @@ void MP1Node::checkMessages() {
 }
 
 
-MessageHdr* newMessage(MsgTypes type, Address addr, vector<MemberListEntry> memberList) {
+MessageHdr* MP1Node::newMessage(MsgTypes type, Address addr, vector<MemberListEntry> memberList) {
   MessageHdr* msg;
   
-  size_t msgsize = sizeof(MessageHdr) + sizeof(addr.addr) + memberList.size()*sizeof(MemberListEntry) + 1;
+  long memberListSize = memberList.size();
+  size_t msgsize = sizeof(MessageHdr) + sizeof(addr.addr) + memberListSize*sizeof(MemberListEntry) + sizeof(long) + 1;
   msg = (MessageHdr *) malloc(msgsize * sizeof(char));
 
   // create JOINREQ message: format of data is {struct Address myaddr}
   msg->msgType = type;
   memcpy((char *)(msg+1), &(addr.addr), sizeof(addr.addr));
-  memcpy((char *)(msg+1+sizeof(addr.addr)), &(*memberList.begin()), memberList.size()*sizeof(MemberListEntry)); 
+  memcpy((char *)(msg+1) + 1 + sizeof(addr.addr), &memberListSize, sizeof(long)); 
+  std::copy( reinterpret_cast<char *>(memberList.data()), reinterpret_cast<char *>(memberList.data()) + memberListSize*sizeof(MemberListEntry), (char *)(msg+1) + 1 + sizeof(addr.addr) + sizeof(long));  
 
   return msg;
 }
@@ -235,42 +240,92 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 	 */
   
 	Member* self = (Member*)env;
-  MessageHdr* msg = (MessageHdr*)data;
+        MessageHdr* msg = (MessageHdr*)data;
 	Address* addr = (Address*)malloc(sizeof(Address));
 	memcpy((char *)(addr->addr), (char*)(msg+1), sizeof(addr->addr)); 
  
 	switch(msg->msgType) {
 	    case JOINREQ:
 	       {
- #ifdef DEBUGLOG
-	        log->LOG(&self->addr, "Received JOINREQ..."); 
-		      log->LOG(addr, "Sent Join request..");
+ #ifdef DEBUGLOG_1
+		static char s[1024];
+		sprintf(s, "Received JOINREQ from %d.%d.%d.%d:%d", addr->addr[0], addr->addr[1], addr->addr[2], addr->addr[3], addr->addr[4]);
+		log->LOG(&self->addr, s); 
  #endif
 	         
 	        long* heartbeat = (long*)(msg + 1 + sizeof(addr->addr));
 
       		int id = *(int*)(&addr->addr);
-      		int port = *(short*)(&addr->addr[4]);
-      		//MemberListEntry mle(id, port, *heartbeat, this->par->getcurrtime());	         
-      		//self->memberList.push_back(mle);
-          MessageHdr* sendMsg = newMessage(JOINREP, self->addr, self->memberList);
-      	  emulNet->ENsend(&self->addr, addr, (char*)(sendMsg), sizeof(MessageHdr) + sizeof(Address) + self->memberList.size()*sizeof(MemberListEntry)+1);
+      		short port = *(short*)(&addr->addr[4]);
+      		MemberListEntry mle(id, port, *heartbeat, this->par->getcurrtime());	         
+      		printf("\nMember Added : %d:%d", mle.id, mle.port);
+		memberNode->memberList.push_back(mle);
+		log->logNodeAdd(&self->addr, addr);
+         	MessageHdr* sendMsg = newMessage(JOINREP, self->addr, memberNode->memberList);
+      	 	emulNet->ENsend(&memberNode->addr, addr, (char*)(sendMsg), sizeof(MessageHdr) + sizeof(Address) + memberNode->memberList.size()*sizeof(MemberListEntry)+1);
           free(sendMsg);
          }
 	       break;
 
 	    case JOINREP:
-	    	{
-			    self->inGroup = true;
-         		#ifdef DEBUGLOG
-          			log->LOG(&self->addr, "Received JOINREP..");
-         		#endif
+		{
+			self->inGroup = true;
+		
+			long membershipSize;
+			memcpy((char*)(&membershipSize), (char*)(msg+1)+1+sizeof(addr->addr), sizeof(long));
+			std::vector<MemberListEntry> membership;
+			membership.resize(membershipSize);
+
+			std::copy((char*)(msg+1)+1+sizeof(long)+sizeof(addr->addr), (char*)(msg+1)+1+sizeof(long)+sizeof(addr->addr)+membershipSize*sizeof(MemberListEntry), reinterpret_cast<char*>(membership.data()));
+			updateMembershipList(membership);
+#ifdef DEBUGLOG_1
+          		log->LOG(&self->addr, "Received JOINREP........................");
+			printMembership(membership);
+			log->LOG(&self->addr, "After Membership Update................");
+			printMembership(memberNode->memberList);
+#endif
          	}
 	       break;
+	     case HEARTBEAT:
+		{
+			long membershipSize;
+			memcpy((char*)(&membershipSize), (char*)(msg+1)+1+sizeof(addr->addr), sizeof(long));
+			std::vector<MemberListEntry> membership;
+			membership.resize(membershipSize);
+			std::copy((char*)(msg+1)+1+sizeof(long)+sizeof(addr->addr), (char*)(msg+1)+1+sizeof(long)+sizeof(addr->addr)+membershipSize*sizeof(MemberListEntry), reinterpret_cast<char*>(membership.data()));
+#ifdef DEBUGLOG_1
+			static char s[1024];
+			sprintf(s, "Received Heartbeat from %d.%d.%d.%d:%d", addr->addr[0], addr->addr[1], addr->addr[2], addr->addr[3], addr->addr[4]); 
+			log->LOG(&self->addr, s);
+			printMembership(membership);
+			log->LOG(&self->addr, "Before Heartbeat Update....................");
+			printMembership(memberNode->memberList);
+#endif		
+
+			updateMembershipList(membership);
+
+#ifdef DEBUGLOG_1
+			log->LOG(&self->addr, "After Membership Update......................");
+			printMembership(memberNode->memberList);
+#endif
+		}
+		break;
 	}
 	
 	free(msg);
 	free(addr);
+}
+
+void MP1Node::printMembership(std::vector<MemberListEntry> memberList) {
+	std::vector<MemberListEntry>::iterator it = memberList.begin();
+	while(it != memberList.end()) {
+		Address addr = getAddress((*it).id, (*it).port);
+//		printf("%d:%d", (*it).id, (*it).port);
+		static char s[1024];		
+		sprintf(s, "%d.%d.%d.%d:%d = %d", addr.addr[0], addr.addr[1], addr.addr[2], addr.addr[3], addr.addr[4], (*it).heartbeat);
+		log->LOG(&memberNode->addr, s);
+		++it;
+	}
 }
 
 /**
@@ -281,13 +336,105 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
  * 				Propagate your membership list
  */
 void MP1Node::nodeLoopOps() {
-
-	/*
-	 * Your code goes here
-	 */
-
+#ifdef DEBUGLOG_2
+    log->LOG(&memberNode->addr, "MP1Node::nodeLoopOps");
+#endif
+    memberNode->heartbeat++;
+    memberNode->memberList[0].heartbeat = memberNode->heartbeat;
+    memberNode->memberList[0].timestamp =  par->getcurrtime();
+    
+    removeMembersIfFailed();
+    sendHeartbeat();
     return;
 }
+
+void MP1Node::removeMembersIfFailed() {
+#ifdef DEBUGLOG_2
+	log->LOG(&memberNode->addr, "MP1Node::removeMembersIfFailed");
+#endif
+	auto newEnd = std::remove_if(memberNode->memberList.begin(), memberNode->memberList.end(),
+			[this](MemberListEntry mle) { 
+				if(mle.timestamp + TREMOVE <= par->getcurrtime()) {
+					Address addr = getAddress(mle.id, mle.port);
+					log->logNodeRemove(&memberNode->addr, &addr);
+					return true;
+				}
+			}
+		      );
+	memberNode->memberList.erase(newEnd, memberNode->memberList.end());
+}
+
+
+void MP1Node::sendHeartbeat() {
+#ifdef DEBUGLOG_2
+	log->LOG(&memberNode->addr, "MP1Node::sendHeartbeat");
+#endif
+	std::random_device rd;
+	std::mt19937 g(rd());
+#ifdef DEBUGLOG_2
+	printMembership(memberNode->memberList);
+#endif
+	std::vector<MemberListEntry> v;
+	for(int i=1; i < memberNode->memberList.size(); i++) {
+		if(memberNode->memberList[i].timestamp + TFAIL > par->getcurrtime())
+			v.push_back(memberNode->memberList[i]);
+	}
+#ifdef DEBUGLOG_2
+	log->LOG(&memberNode->addr, "MP1Node::sendHeartbeat::Failed Filtering");
+#endif
+	std::shuffle(v.begin(), v.end(), g);
+
+	v.push_back(memberNode->memberList[0]);
+#ifdef DEBUGLOG_2
+	printMembership(v);
+#endif
+	
+	MessageHdr* msg = newMessage(HEARTBEAT, memberNode->addr, v);
+	Address* addr = (Address*) malloc(sizeof(Address));
+	int msgSize =  sizeof(MessageHdr) + sizeof(Address) + v.size()*sizeof(MemberListEntry) + sizeof(long) + 1;
+	static char s[1024];
+
+#if 1
+	if(v.size() > 1) {
+		Address addr0 = getAddress(v[0].id, v[0].port);
+		memcpy((char*)addr, (char*)(&addr0), sizeof(Address));
+#ifdef DEBUGLOG_1
+		sprintf(s, "Sending heartbeat to %d.%d.%d.%d:%d", addr0.addr[0], addr0.addr[1], addr0.addr[2], addr0.addr[3], addr0.addr[4]);
+		log->LOG(&memberNode->addr, s);
+		printMembership(v);
+#endif
+		emulNet->ENsend(&memberNode->addr, addr, (char*)(msg), msgSize);
+	}
+
+	if(v.size() > 2) {	
+		Address addr1 = getAddress(v[1].id, v[1].port);
+		memcpy((char*)addr, (char*)(&addr1), sizeof(Address));
+#ifdef DEBUGLOG_1
+		sprintf(s, "Sending heartbeat to %d.%d.%d.%d:%d", addr1.addr[0], addr1.addr[1], addr1.addr[2], addr1.addr[3], addr1.addr[4]);
+		log->LOG(&memberNode->addr, s);
+#endif
+		emulNet->ENsend(&memberNode->addr, addr, (char*)(msg), msgSize);
+	}
+#endif
+#if 0
+	for(auto node: v) {
+		if(node.id != getId(memberNode->addr)) {
+			Address addr0 = getAddress(node.id, node.port);
+		memcpy((char*)addr, (char*)(&addr0), sizeof(Address));
+#ifdef DEBUGLOG_1
+		sprintf(s, "Sending heartbeat to %d.%d.%d.%d:%d", addr0.addr[0], addr0.addr[1], addr0.addr[2], addr0.addr[3], addr0.addr[4]);
+		log->LOG(&memberNode->addr, s);
+		printMembership(v);
+#endif
+		emulNet->ENsend(&memberNode->addr, addr, (char*)(msg), msgSize);
+		
+		}
+	}
+#endif
+	free(msg);
+	free(addr);
+}
+
 
 /**
  * FUNCTION NAME: isNullAddress
@@ -320,6 +467,54 @@ Address MP1Node::getJoinAddress() {
  */
 void MP1Node::initMemberListTable(Member *memberNode) {
 	memberNode->memberList.clear();
+	
+	MemberListEntry myEntry(getId(memberNode->addr), getPort(memberNode->addr), memberNode->heartbeat, this->par->getcurrtime());
+	memberNode->memberList.push_back(myEntry);
+	memberNode->myPos = memberNode->memberList.begin();
+}
+
+void MP1Node::updateMembershipList(std::vector<MemberListEntry> receivedMemberList) {
+	std::for_each(receivedMemberList.begin(), receivedMemberList.end(), [this](MemberListEntry mle) {
+			std::vector<MemberListEntry>::iterator it = std::find_if(memberNode->memberList.begin(), memberNode->memberList.end(), [mle](const MemberListEntry& m){ return mle.id == m.id && mle.port == m.port; });
+		if(it != memberNode->memberList.end()) {
+			if((int)(mle.heartbeat) > (int)((*it).heartbeat)) {
+				(*it).heartbeat = mle.heartbeat;
+				(*it).timestamp = par->getcurrtime();
+			}
+		} else {
+			mle.timestamp = par->getcurrtime();
+			memberNode->memberList.push_back(mle);
+			Address addr = getAddress(mle.id, mle.port);
+			log->logNodeAdd(&memberNode->addr, &addr);
+		}
+	});
+
+#if 0
+	for(int i=0; i<receivedMemberList.size(); i++) {
+		int j = 0;
+		for(; j<memberNode->memberList.size(); j++) {
+			if(receivedMemberList[i].id == memberNode->memberList[j].id && receivedMemberList[i].port == memberNode->memberList[j].port) {
+			static char s[1024];
+			sprintf(s, "%d.%d > %d.%d", receivedMemberList[i].id, receivedMemberList[i].heartbeat, memberNode->memberList[j].id, memberNode->memberList[j].heartbeat);
+			log->LOG(&memberNode->addr, s);
+
+				if((int)(receivedMemberList[i].heartbeat) > (int)(memberNode->memberList[j].heartbeat)) {
+					log->LOG(&memberNode->addr, s);
+					memberNode->memberList[j].heartbeat = receivedMemberList[i].heartbeat;
+					memberNode->memberList[j].timestamp = par->getcurrtime();
+				}
+				break;
+			}
+		}
+
+		if(j == memberNode->memberList.size()) {
+			receivedMemberList[i].timestamp = par->getcurrtime();
+			memberNode->memberList.push_back(receivedMemberList[i]);
+			Address addr = getAddress(receivedMemberList[i].id, receivedMemberList[i].port);
+			log->logNodeAdd(&memberNode->addr, &addr);
+		}
+	}
+#endif
 }
 
 /**
@@ -333,3 +528,18 @@ void MP1Node::printAddress(Address *addr)
                                                        addr->addr[3], *(short*)&addr->addr[4]) ;    
 }
 
+Address MP1Node::getAddress(int id, short port) {
+        Address addr;
+	memcpy(&(addr.addr[0]), &id, sizeof(int));
+	memcpy(&(addr.addr[4]), &port, sizeof(short));
+        return addr;
+}
+
+
+int MP1Node::getId(Address addr) {
+	return *(int*)(&addr.addr[0]);
+}
+
+short MP1Node::getPort(Address addr) {
+	return *(short*)(&addr.addr[4]);
+}
