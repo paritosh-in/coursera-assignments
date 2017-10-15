@@ -14,6 +14,7 @@ MP2Node::MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Ad
     this->emulNet = emulNet;
     this->log = log;
     ht = new HashTable();
+    transactions = map<int, Transaction>();
     this->memberNode->addr = *address;
 }
 
@@ -53,6 +54,7 @@ void MP2Node::updateRing() {
     sort(curMemList.begin(), curMemList.end());
 
 
+    ring = curMemList;
     /*
      * Step 3: Run the stabilization protocol IF REQUIRED
      */
@@ -108,9 +110,12 @@ size_t MP2Node::hashFunction(string key) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientCreate(string key, string value) {
-    /*
-     * Implement this
-     */
+    vector<Node> nodes = findNodes(key);
+    Message message(g_transID++, this->getMemberNode()->addr, CREATE, key, value);
+    recordTransaction(message);
+    for(Node node : nodes) {
+        dispatchMessage(message, node.getAddress());
+    }
 }
 
 /**
@@ -123,9 +128,12 @@ void MP2Node::clientCreate(string key, string value) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientRead(string key) {
-    /*
-     * Implement this
-     */
+    vector<Node> nodes = findNodes(key);
+    Message message(g_transID++, getMemberNode()->addr, READ, key);
+    recordTransaction(message);
+    for(Node node : nodes) {
+        dispatchMessage(message, node.getAddress());
+    }
 }
 
 /**
@@ -138,9 +146,12 @@ void MP2Node::clientRead(string key) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientUpdate(string key, string value) {
-    /*
-     * Implement this
-     */
+    vector<Node> nodes = findNodes(key);
+    Message message(g_transID++, getMemberNode()->addr, UPDATE, key, value);
+    recordTransaction(message);
+    for(Node node : nodes) {
+        dispatchMessage(message, node.getAddress());
+    }
 }
 
 /**
@@ -153,9 +164,12 @@ void MP2Node::clientUpdate(string key, string value) {
  * 				3) Sends a message to the replica
  */
 void MP2Node::clientDelete(string key) {
-    /*
-     * Implement this
-     */
+    vector<Node> nodes = findNodes(key);
+    Message message(g_transID++, getMemberNode()->addr, DELETE, key);
+    recordTransaction(message);
+    for(Node node : nodes) {
+        dispatchMessage(message, node.getAddress());
+    }
 }
 
 /**
@@ -167,10 +181,8 @@ void MP2Node::clientDelete(string key) {
  * 			   	2) Return true or false based on success or failure
  */
 bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
-    /*
-     * Implement this
-     */
     // Insert key, value, replicaType into the hash table
+    return ht->create(key, value);
 }
 
 /**
@@ -182,10 +194,8 @@ bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
  * 			    2) Return value
  */
 string MP2Node::readKey(string key) {
-    /*
-     * Implement this
-     */
     // Read key from local hash table and return value
+    return ht->read(key);
 }
 
 /**
@@ -197,10 +207,8 @@ string MP2Node::readKey(string key) {
  * 				2) Return true or false based on success or failure
  */
 bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
-    /*
-     * Implement this
-     */
     // Update key in local hash table and return true or false
+    return ht->update(key, value);
 }
 
 /**
@@ -212,10 +220,8 @@ bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
  * 				2) Return true or false based on success or failure
  */
 bool MP2Node::deletekey(string key) {
-    /*
-     * Implement this
-     */
     // Delete the key from the local hash table
+    return ht->deleteKey(key);
 }
 
 /**
@@ -248,9 +254,8 @@ void MP2Node::checkMessages() {
 
         string message(data, data + size);
 
-        /*
-         * Handle the message types here
-         */
+        Message msg(message);
+        handleMessage(msg);
 
     }
 
@@ -258,6 +263,7 @@ void MP2Node::checkMessages() {
      * This function should also ensure all READ and UPDATE operation
      * get QUORUM replies
      */
+    checkForQuorum();
 }
 
 /**
@@ -327,4 +333,111 @@ void MP2Node::stabilizationProtocol() {
     /*
      * Implement this
      */
+}
+
+// coordinator dispatches messages to corresponding nodes
+void MP2Node::dispatchMessage (Message message, Address* address) {
+    emulNet->ENsend(&(getMemberNode()->addr), address, message.toString());
+}
+
+void MP2Node::handleMessage(Message message) {
+    switch (message.type) {
+        case CREATE:
+            if(createKeyValue(message.key, message.value, PRIMARY)) {
+                log->logCreateSuccess(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+                message.type = REPLY;
+                dispatchMessage(message, &(message.fromAddr));
+            } else {
+                log->logCreateFail(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+            }
+            break;
+
+        case DELETE:
+            if(deletekey(message.key)) {
+                log->logDeleteSuccess(&(getMemberNode()->addr), false, message.transID, message.key);
+                Message reply(message.transID, getMemberNode()->addr, REPLY, true);
+                dispatchMessage(reply, &(message.fromAddr));
+            } else {
+                log->logDeleteFail(&(getMemberNode()->addr), false, message.transID, message.key);
+            }
+
+        case REPLY:
+            recordTransactionReply(message);
+    }
+}
+
+void MP2Node::recordTransaction (Message message) {
+    Transaction transaction;
+    transaction.timestamp = par->getcurrtime();
+    transaction.request = message.toString();
+
+    transactions.emplace(message.transID, transaction);
+}
+
+void MP2Node::recordTransactionReply (Message message) {
+    map<int, Transaction>::iterator search;
+
+    search = transactions.find(message.transID);
+    if (search != transactions.end())
+        search->second.responses.push_back(message.toString());
+}
+
+void MP2Node::checkForQuorum() {
+    std::for_each(transactions.begin(), transactions.end(), [this](pair<int, Transaction> mPair) {
+        if(mPair.second.responses.size() >= QUORUM) {
+            logSuccess(mPair.second);
+            removeTrnsaction(mPair.first);
+        }
+        if(par->getcurrtime() > mPair.second.timestamp + RTT) {
+            logFailure(mPair.second);
+            removeTrnsaction(mPair.first);
+        }
+    });
+}
+
+void MP2Node::logSuccess(Transaction transaction) {
+    Message message(transaction.request);
+    switch (message.type) {
+        case CREATE:
+            log->logCreateSuccess(&(getMemberNode()->addr), true, message.transID, message.key, message.value);
+            break;
+
+        case UPDATE:
+            log->logUpdateSuccess(&(getMemberNode()->addr), true, message.transID, message.key, message.value);
+            break;
+
+        case DELETE:
+            log->logDeleteSuccess(&(getMemberNode()->addr), true, message.transID, message.key);
+            break;
+
+        case READ:
+            Message response(transaction.responses[0]);
+            log->logReadSuccess(&(getMemberNode()->addr), true, message.transID, message.key, response.value);
+            break;
+    }
+}
+
+void MP2Node::logFailure(Transaction transaction) {
+    Message message(transaction.request);
+    switch (message.type) {
+        case CREATE:
+            log->logCreateFail(&(getMemberNode()->addr), true, message.transID, message.key, message.value);
+            break;
+
+        case READ:
+            log->logReadFail(&(getMemberNode()->addr), true, message.transID, message.key);
+            break;
+
+        case UPDATE:
+            log->logUpdateFail(&(getMemberNode()->addr), true, message.transID, message.key, message.value);
+            break;
+
+        case DELETE:
+            log->logDeleteFail(&(getMemberNode()->addr), true, message.transID, message.key);
+            break;
+    }
+}
+
+void MP2Node::removeTrnsaction(int transId) {
+    transactions.erase(transId);
 }

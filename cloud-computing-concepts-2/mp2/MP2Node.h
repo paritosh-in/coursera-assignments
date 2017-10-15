@@ -19,6 +19,17 @@
 #include "Message.h"
 #include "Queue.h"
 
+#include <map>
+
+struct Transaction {
+    int timestamp;
+    string request;
+    vector<string> responses;
+};
+
+#define QUORUM 2
+#define RTT 5
+
 /**
  * CLASS NAME: MP2Node
  *
@@ -39,6 +50,10 @@ private:
     vector <Node> ring;
     // Hash Table
     HashTable *ht;
+
+    // Hash Table to store transactions for quorum.
+    map<int, Transaction> transactions;
+
     // Member representing this member
     Member *memberNode;
     // Params object
@@ -48,44 +63,16 @@ private:
     // Object of Log
     Log *log;
 
-public:
-    MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Address *addressOfMember);
-
-    Member *getMemberNode() {
-        return this->memberNode;
-    }
-
-    // ring functionalities
-    void updateRing();
-
     vector <Node> getMembershipList();
 
     size_t hashFunction(string key);
 
     void findNeighbors();
 
-    // client side CRUD APIs
-    void clientCreate(string key, string value);
-
-    void clientRead(string key);
-
-    void clientUpdate(string key, string value);
-
-    void clientDelete(string key);
-
-    // receive messages from Emulnet
-    bool recvLoop();
-
     static int enqueueWrapper(void *env, char *buff, int size);
 
-    // handle messages from receiving queue
-    void checkMessages();
-
     // coordinator dispatches messages to corresponding nodes
-    void dispatchMessages(Message message);
-
-    // find the addresses of nodes that are responsible for a key
-    vector <Node> findNodes(string key);
+    void dispatchMessage(Message message, Address* address);
 
     // server
     bool createKeyValue(string key, string value, ReplicaType replica);
@@ -98,6 +85,48 @@ public:
 
     // stabilization protocol - handle multiple failures
     void stabilizationProtocol();
+
+    void handleMessage(Message msg);
+
+    void recordTransaction(Message msg);
+
+    void recordTransactionReply(Message msg);
+
+    void checkForQuorum();
+
+    void logSuccess(Transaction);
+
+    void logFailure(Transaction);
+
+    void removeTrnsaction(int);
+
+public:
+    MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Address *addressOfMember);
+
+    Member *getMemberNode() {
+        return this->memberNode;
+    }
+
+    // client side CRUD APIs
+    void clientCreate(string key, string value);
+
+    void clientRead(string key);
+
+    void clientUpdate(string key, string value);
+
+    void clientDelete(string key);
+
+    // find the addresses of nodes that are responsible for a key
+    vector <Node> findNodes(string key);
+
+    // handle messages from receiving queue
+    void checkMessages();
+
+    // receive messages from Emulnet
+    bool recvLoop();
+
+    // ring functionalities
+    void updateRing();
 
     ~MP2Node();
 };
