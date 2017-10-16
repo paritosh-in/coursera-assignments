@@ -100,6 +100,16 @@ private:
 
     void removeTrnsaction(int);
 
+    vector<Node> getNewHROs();
+
+    vector<Node> getNewHMRs();
+
+    void sendData(Node node, string k);
+
+    bool amOwner(string key);
+
+    void clearUnrelevantData();
+
 public:
     MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Address *addressOfMember);
 

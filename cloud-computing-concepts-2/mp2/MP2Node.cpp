@@ -54,11 +54,13 @@ void MP2Node::updateRing() {
     sort(curMemList.begin(), curMemList.end());
 
 
+    ring.clear();
     ring = curMemList;
     /*
      * Step 3: Run the stabilization protocol IF REQUIRED
      */
     // Run stabilization protocol if the hash table size is greater than zero and if there has been a changed in the ring
+    stabilizationProtocol();
 }
 
 /**
@@ -330,9 +332,40 @@ int MP2Node::enqueueWrapper(void *env, char *buff, int size) {
  *				Note:- "CORRECT" replicas implies that every key is replicated in its two neighboring nodes in the ring
  */
 void MP2Node::stabilizationProtocol() {
-    /*
-     * Implement this
-     */
+    vector<Node> newHros = getNewHROs();
+    vector<Node> newHMRs = getNewHMRs();
+    std::for_each(ht->hashTable.begin(), ht->hashTable.end(), [this, newHros, newHMRs](pair<string, string> kv) {
+        vector<Node> replicas = findNodes(kv.first);
+        if(getMemberNode()->addr == *(replicas[1].getAddress()) || newHros.size() >= 2) {
+            std::for_each(replicas.begin(), replicas.end(), [this, newHros, kv](const Node& replica) {
+                std::vector<Node>::const_iterator it = std::find_if(newHros.begin(), newHros.end(),
+                                                              [replica](const Node& hro) {
+                                                                  return hro.nodeHashCode == replica.nodeHashCode;
+                                                              });
+                if (it != newHros.end())
+                    sendData(*it, kv.first);
+            });
+
+            return;
+        }
+
+        if(getMemberNode()->addr == *(replicas[0].getAddress())) {
+            std::for_each(replicas.begin(), replicas.end(), [this, newHMRs, kv](const Node& replica) {
+                std::vector<Node>::const_iterator it = std::find_if(newHMRs.begin(), newHMRs.end(),
+                                                              [replica](const Node& hmr) {
+                                                                  return hmr.nodeHashCode == replica.nodeHashCode;
+                                                              });
+                if (it != newHMRs.end())
+                    sendData(*it, kv.first);
+            });
+            return;
+        }
+
+        /*if(Node(getMemberNode()->addr).nodeHashCode != replicas[2].getHashCode()) {
+            ht->deleteKey(kv.first);
+            return;
+        }*/
+    });
 }
 
 // coordinator dispatches messages to corresponding nodes
@@ -343,14 +376,47 @@ void MP2Node::dispatchMessage (Message message, Address* address) {
 void MP2Node::handleMessage(Message message) {
     switch (message.type) {
         case CREATE:
-            if(createKeyValue(message.key, message.value, PRIMARY)) {
-                log->logCreateSuccess(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
-                message.type = REPLY;
-                dispatchMessage(message, &(message.fromAddr));
+            if(message.transID == -1) {
+                createKeyValue(message.key, message.value, PRIMARY);
+                /*if(amOwner(message.key)) {
+                    for(Node node: hasMyReplicas) {
+                        dispatchMessage(message, node.getAddress());
+                    }
+                }*/
             } else {
-                log->logCreateFail(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+                if(createKeyValue(message.key, message.value, PRIMARY)) {
+                    log->logCreateSuccess(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+                    message.type = REPLY;
+                    dispatchMessage(message, &(message.fromAddr));
+                } else {
+                    log->logCreateFail(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+                }
             }
             break;
+
+        case READ:
+            {
+                string ret = readKey(message.key);
+                if(ret != "") {
+                    log->logReadSuccess(&(getMemberNode()->addr), false, message.transID, message.key, ret);
+                    Message reply(message.transID, getMemberNode()->addr, READREPLY, message.key, ret);
+                    dispatchMessage(reply, &(message.fromAddr));
+                } else {
+                    log->logReadFail(&(getMemberNode()->addr), false, message.transID, message.key);
+                }
+            }
+            break;
+
+        case UPDATE:
+            if(updateKeyValue(message.key, message.value, PRIMARY)) {
+                log->logUpdateSuccess(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+                Message reply(message.transID, getMemberNode()->addr, REPLY, message.key);
+                dispatchMessage(reply, &(message.fromAddr));
+            } else {
+                log->logUpdateFail(&(getMemberNode()->addr), false, message.transID, message.key, message.value);
+            }
+            break;
+            
 
         case DELETE:
             if(deletekey(message.key)) {
@@ -360,9 +426,13 @@ void MP2Node::handleMessage(Message message) {
             } else {
                 log->logDeleteFail(&(getMemberNode()->addr), false, message.transID, message.key);
             }
+            break;
+            
 
         case REPLY:
+        case READREPLY:
             recordTransactionReply(message);
+            break;
     }
 }
 
@@ -440,4 +510,77 @@ void MP2Node::logFailure(Transaction transaction) {
 
 void MP2Node::removeTrnsaction(int transId) {
     transactions.erase(transId);
+}
+
+
+vector<Node> MP2Node::getNewHROs() {
+    Node self(getMemberNode()->addr);
+    vector<Node> hros;
+
+    self.computeHashCode();
+
+    std::vector<Node>::const_iterator it = std::find_if(ring.begin(), ring.end(), [this, self](const Node& node){
+        return node.nodeHashCode == self.nodeHashCode;
+    });
+
+    if(it != ring.end()) {
+        hros.push_back(it[-1]);
+        hros.push_back(it[-2]);
+    }
+
+    vector<Node> newHros;
+
+    std::set_difference(
+            hros.begin(), hros.end(),
+            haveReplicasOf.begin(), haveReplicasOf.end(),
+            std::back_inserter(newHros)
+    );
+
+    haveReplicasOf.clear();
+    haveReplicasOf = hros;
+
+    return newHros;
+}
+
+vector<Node> MP2Node::getNewHMRs() {
+    Node self(getMemberNode()->addr);
+    vector<Node> hmrs;
+
+    self.computeHashCode();
+
+    std::vector<Node>::const_iterator it = std::find_if(ring.begin(), ring.end(), [this, self](const Node& node){
+        return node.nodeHashCode == self.nodeHashCode;
+    });
+
+    if(it != ring.end()) {
+        hmrs.push_back(it[1]);
+        hmrs.push_back(it[2]);
+    }
+    vector<Node> newHmrs;
+
+    std::set_difference(
+            hmrs.begin(), hmrs.end(),
+            hasMyReplicas.begin(), hasMyReplicas.end(),
+            std::back_inserter(newHmrs)
+    );
+
+    hasMyReplicas.clear();
+    hasMyReplicas = hmrs;
+
+    return newHmrs;
+}
+
+void MP2Node::sendData(Node node, string k) {
+    Message message(-1, getMemberNode()->addr, CREATE, k, ht->read(k));
+    emulNet->ENsend(&(getMemberNode()->addr), node.getAddress(), message.toString());
+}
+
+bool MP2Node::amOwner(string key) {
+    vector<Node> nodes = findNodes(key);
+    return Node(getMemberNode()->addr).getHashCode() == nodes[0].getHashCode();
+}
+
+
+void MP2Node::clearUnrelevantData() {
+
 }
